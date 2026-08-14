@@ -78,6 +78,10 @@ class RepositoryReader:
         # Check if it is an ignored file
         if path.is_file() and path.name in self.IGNORE_FILES:
             return True
+
+        # Skip obvious hidden/generated directories and files outside the supported set
+        if any(part.startswith(".") and part not in {".", ".."} for part in parts[:-1]):
+            return True
             
         return False
 
@@ -98,8 +102,10 @@ class RepositoryReader:
                 return None
                 
             # Read content using UTF-8 decoding, catch errors if binary
-            with open(path, "r", encoding="utf-8", errors="strict") as f:
-                return f.read()
+            raw = path.read_bytes()
+            if b"\x00" in raw:
+                return None
+            return raw.decode("utf-8", errors="strict")
         except (UnicodeDecodeError, PermissionError, OSError):
             # Suppress errors for binary files or lock files we shouldn't open
             return None
