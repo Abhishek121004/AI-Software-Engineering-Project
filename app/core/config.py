@@ -12,6 +12,8 @@ class Settings:
 
     def __init__(self) -> None:
         self.gemini_api_key: str = os.getenv("GEMINI_API_KEY", "").strip()
+        self.gemini_chat_model: str = os.getenv("GEMINI_CHAT_MODEL", "gemini-2.5-flash")
+        self.gemini_embedding_model: str = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-2")
         self.chroma_persist_dir: str = os.getenv("CHROMA_PERSIST_DIR", "data/chromadb")
         self.default_repository_id: str = os.getenv("DEFAULT_REPOSITORY_ID", "repository")
 
@@ -24,7 +26,8 @@ class Settings:
 
     @property
     def has_gemini_key(self) -> bool:
-        return bool(self.gemini_api_key)
+        placeholder = {"", "your_gemini_api_key_here", "replace_me", "change_me"}
+        return bool(self.gemini_api_key) and self.gemini_api_key.lower() not in placeholder
 
 
 settings = Settings()

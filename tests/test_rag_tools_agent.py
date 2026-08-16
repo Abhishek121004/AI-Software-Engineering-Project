@@ -1,10 +1,12 @@
 from pathlib import Path
 
 import pytest
+from langchain_core.messages import AIMessage
 
 from app.agents.repository_agent import RepositoryAgent
 from app.core.repository import RepositoryIndexOptions, RepositoryIndexer
 from app.memory.conversation import ConversationMemory
+from app.retrieval.hybrid import HybridRetriever
 from app.retrieval.rag import RepositoryRAG
 from app.retrieval.vector_store import CodeVectorStore
 from app.tools.repository_tools import RepositoryTools
@@ -42,12 +44,29 @@ def login(user_id):
     store = CodeVectorStore(persist_dir=tmp_path / "chromadb")
     store.add_chunks([{"content": chunk.content, "metadata": chunk.metadata} for chunk in corpus.chunks], corpus.repository_id)
     tools = RepositoryTools(corpus=corpus, vector_store=store)
-    return corpus, store, tools
+    retriever = HybridRetriever(corpus=corpus, vector_store=store)
+    rag = RepositoryRAG(vector_store=store, retriever=retriever)
+    return corpus, store, tools, rag
+
+
+class FakeToolCallingLLM:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.bound_tools = None
+        self.calls = 0
+
+    def bind_tools(self, tools):
+        self.bound_tools = tools
+        return self
+
+    def invoke(self, messages):
+        response = self.responses[self.calls]
+        self.calls += 1
+        return response
 
 
 def test_rag_pipeline_returns_sources(tmp_path):
-    corpus, store, _ = build_sample_repo(tmp_path)
-    rag = RepositoryRAG(vector_store=store)
+    corpus, store, _, rag = build_sample_repo(tmp_path)
 
     bundle = rag.answer("Where is create_token defined?", repository_id=corpus.repository_id)
 
@@ -57,9 +76,20 @@ def test_rag_pipeline_returns_sources(tmp_path):
 
 
 def test_repository_tools_and_agent(tmp_path):
-    corpus, store, tools = build_sample_repo(tmp_path)
+    corpus, store, tools, rag = build_sample_repo(tmp_path)
     memory = ConversationMemory()
-    agent = RepositoryAgent(rag=RepositoryRAG(vector_store=store), tools=tools, memory=memory)
+    fake_llm = FakeToolCallingLLM(
+        [
+            AIMessage(
+                tool_calls=[
+                    {"name": "repository_qa", "args": {"question": "Where is create_token used?", "top_k": 5}, "id": "call-1"}
+                ],
+                content="",
+            ),
+            AIMessage(content="create_token is used in service.py."),
+        ]
+    )
+    agent = RepositoryAgent(rag=rag, tools=tools, memory=memory, llm=fake_llm)
 
     tree = tools.get_repository_tree()
     assert tree["count"] == 2
@@ -80,5 +110,5 @@ def test_repository_tools_and_agent(tmp_path):
     response = agent.answer("Where is create_token used?")
     assert "answer" in response
     assert response["trace"]
-    assert "service.py" in str(response["result"])
-
+    assert "service.py" in response["answer"] or any("service.py" in str(source) for source in response.get("sources", []))
+    assert response.get("sources")

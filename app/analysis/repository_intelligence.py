@@ -19,6 +19,7 @@ from app.core.models import (
 )
 from app.core.repository import RepositoryIndexer
 from app.memory.conversation import ConversationMemory
+from app.retrieval.hybrid import HybridRetriever
 from app.retrieval.rag import RepositoryRAG
 from app.tools.repository_tools import RepositoryTools
 
@@ -46,10 +47,16 @@ class ImportRecord:
 class RepositoryIntelligence:
     """Repository-focused analysis and generation utilities built on top of RAG."""
 
-    def __init__(self, tools: RepositoryTools, rag: Optional[RepositoryRAG] = None) -> None:
+    def __init__(
+        self,
+        tools: RepositoryTools,
+        rag: Optional[RepositoryRAG] = None,
+        retriever: Optional[HybridRetriever] = None,
+    ) -> None:
         self.tools = tools
         self.rag = rag
         self.corpus = tools.corpus
+        self.hybrid_retriever = retriever or HybridRetriever(self.corpus, tools.vector_store)
 
     def _files_by_language(self, language: Optional[str] = None):
         for file in self.corpus.files:
@@ -276,7 +283,11 @@ class RepositoryIntelligence:
         )
 
     def code_search(self, query: str, top_k: int = 5):
-        return self.tools.search_code(query=query, top_k=top_k)
+        return self.hybrid_retriever.retrieve(
+            query=query,
+            repository_id=self.corpus.repository_id,
+            top_k=top_k,
+        ).chunks
 
     def code_review(self, target_file: Optional[str] = None) -> CodeReviewReport:
         files = [file for file in self.corpus.files if target_file is None or file.file_path == target_file]
@@ -524,4 +535,3 @@ class RepositoryIntelligence:
             source_file=file.file_path,
             symbol=symbol or "general",
         )
-

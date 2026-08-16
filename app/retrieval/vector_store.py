@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
-import re
 import os
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+from app.core.config import settings
+from app.core.gemini import create_gemini_embeddings_model, has_gemini_runtime
 from app.core.models import RetrievedChunk
 
 try:  # pragma: no cover - optional acceleration
@@ -87,25 +88,36 @@ class CodeVectorStore:
     def __init__(
         self,
         persist_dir: str | Path,
-        embeddings_model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+        embeddings_model_name: Optional[str] = None,
         embedding_dimension: int = 384,
+        embeddings_backend: Optional[_EmbeddingBackend] = None,
     ) -> None:
         self.persist_dir = Path(persist_dir).resolve()
         self.persist_dir.mkdir(parents=True, exist_ok=True)
         self.index_path = self.persist_dir / "index.json"
-        self.embeddings_model_name = embeddings_model_name
+        self.embeddings_model_name = embeddings_model_name or settings.gemini_embedding_model
+        self.embedding_dimension = embedding_dimension
+        self._fallback_embeddings = _HashedBackend(dimension=embedding_dimension)
 
         prefer_sentence_transformers = os.getenv("USE_SENTENCE_TRANSFORMERS", "").lower() in {"1", "true", "yes"}
+        prefer_gemini = os.getenv("USE_GEMINI_EMBEDDINGS", "").lower() in {"1", "true", "yes"}
 
-        if callable(GoogleGenerativeAIEmbeddings):
+        if embeddings_backend is not None:
+            self.embeddings = embeddings_backend
+        elif callable(GoogleGenerativeAIEmbeddings):
             self.embeddings = GoogleGenerativeAIEmbeddings(  # type: ignore[operator]
                 model=self.embeddings_model_name,
-                google_api_key=None,
+                google_api_key=settings.gemini_api_key or None,
             )
+        elif has_gemini_runtime() and (prefer_gemini or not prefer_sentence_transformers):
+            try:
+                self.embeddings = create_gemini_embeddings_model(model_name=self.embeddings_model_name)
+            except Exception:
+                self.embeddings = self._fallback_embeddings
         elif prefer_sentence_transformers and SentenceTransformer is not None:
-            self.embeddings: _EmbeddingBackend = _SentenceTransformerBackend(self.embeddings_model_name)
+            self.embeddings = _SentenceTransformerBackend(self.embeddings_model_name)
         else:
-            self.embeddings = _HashedBackend(dimension=embedding_dimension)
+            self.embeddings = self._fallback_embeddings
 
         self._entries: List[IndexedChunk] = []
         self._load()
@@ -125,6 +137,20 @@ class CodeVectorStore:
     def _save(self) -> None:
         payload = {"entries": [asdict(entry) for entry in self._entries]}
         self.index_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
+
+    def _embed_documents(self, texts: List[str]) -> List[List[float]]:
+        try:
+            return self.embeddings.embed_documents(texts)
+        except Exception:
+            self.embeddings = self._fallback_embeddings
+            return self.embeddings.embed_documents(texts)
+
+    def _embed_query(self, text: str) -> List[float]:
+        try:
+            return self.embeddings.embed_query(text)
+        except Exception:
+            self.embeddings = self._fallback_embeddings
+            return self.embeddings.embed_query(text)
 
     @staticmethod
     def _normalize_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
@@ -162,7 +188,7 @@ class CodeVectorStore:
         if not texts:
             return
 
-        vectors = self.embeddings.embed_documents(texts)
+        vectors = self._embed_documents(texts)
         for record, vector in zip(records, vectors):
             self._entries.append(
                 IndexedChunk(
@@ -217,7 +243,7 @@ class CodeVectorStore:
         if filter_dict:
             filters.update(filter_dict)
 
-        query_vector = np.asarray(self.embeddings.embed_query(query), dtype=np.float32)
+        query_vector = np.asarray(self._embed_query(query), dtype=np.float32)
         scored: List[RetrievedChunk] = []
 
         for entry in self._entries:

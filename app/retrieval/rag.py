@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import time
-from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Protocol
 
+from app.core.gemini import create_gemini_chat_model, has_gemini_runtime
 from app.core.models import AnswerBundle, RetrievedChunk, SourceReference
 from app.retrieval.context import ContextBuilder
+from app.retrieval.hybrid import HybridRetriever
 from app.retrieval.vector_store import CodeVectorStore
+from langchain_core.messages import HumanMessage
 
 
 class TextGenerator(Protocol):
@@ -25,12 +27,18 @@ class RepositoryRAG:
 
     def __init__(
         self,
-        vector_store: CodeVectorStore,
+        vector_store: Optional[CodeVectorStore] = None,
+        retriever: Optional[HybridRetriever] = None,
         generator: Optional[TextGenerator] = None,
+        chat_model: Optional[object] = None,
         context_builder: Optional[ContextBuilder] = None,
         config: Optional[RetrievalConfig] = None,
     ) -> None:
         self.vector_store = vector_store
+        self.retriever = retriever
+        self.chat_model = chat_model
+        if self.chat_model is None and has_gemini_runtime():
+            self.chat_model = create_gemini_chat_model()
         self.generator = generator or self._default_generator
         self.context_builder = context_builder or ContextBuilder()
         self.config = config or RetrievalConfig()
@@ -38,6 +46,15 @@ class RepositoryRAG:
     @staticmethod
     def _default_generator(prompt: str) -> str:
         return prompt
+
+    def _generate_with_chat_model(self, prompt: str) -> str:
+        if self.chat_model is None:
+            return self._default_generator(prompt)
+        try:
+            response = self.chat_model.invoke([HumanMessage(content=prompt)])
+            return getattr(response, "content", str(response))
+        except Exception:
+            return self._default_generator(prompt)
 
     @staticmethod
     def _extract_terms(question: str) -> List[str]:
@@ -59,6 +76,18 @@ class RepositoryRAG:
         k = top_k or self.config.top_k
         threshold = self.config.similarity_threshold if similarity_threshold is None else similarity_threshold
 
+        if self.retriever is not None:
+            return self.retriever.retrieve(
+                query=question,
+                repository_id=repository_id,
+                top_k=k,
+                filter_dict=filter_dict,
+                similarity_threshold=threshold,
+            ).chunks
+
+        if self.vector_store is None:
+            return []
+
         semantic_results = self.vector_store.search(
             query=question,
             repository_id=repository_id,
@@ -73,7 +102,7 @@ class RepositoryRAG:
                 continue
             exact_results.extend(self.vector_store.exact_match(term, repository_id=repository_id, k=k))
 
-        merged: "OrderedDict[tuple[str, int, int], RetrievedChunk]" = OrderedDict()
+        merged: Dict[tuple[str, int, int], RetrievedChunk] = {}
         for candidate in [*exact_results, *semantic_results]:
             meta = candidate.metadata
             key = (
@@ -141,7 +170,10 @@ class RepositoryRAG:
             memory_snippet=memory_snippet,
         )
         prompt = self._build_answer_prompt(context.context_text)
-        generated = self.generator(prompt)
+        if self.generator is self._default_generator:
+            generated = self._generate_with_chat_model(prompt)
+        else:
+            generated = self.generator(prompt)
         answer_text = generated if generated.strip() != prompt.strip() else self._fallback_answer(question, retrieved_chunks)
 
         latency_ms = (time.perf_counter() - start) * 1000.0
@@ -166,4 +198,3 @@ class RepositoryRAG:
                 location = f"{location} ({source.start_line}-{source.end_line})"
             lines.append(f"- {location} :: {source.symbol}")
         return "\n".join(lines)
-
