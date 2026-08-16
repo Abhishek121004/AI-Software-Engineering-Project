@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
@@ -11,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.agents.repository_agent import RepositoryAgent
+from app.analysis.repository_intelligence import RepositoryIntelligence
 from app.core.config import settings
 from app.core.repository import RepositoryIndexOptions, RepositoryIndexer
 from app.memory.conversation import ConversationMemory
@@ -30,6 +32,8 @@ if "vector_store" not in st.session_state:
     st.session_state.vector_store = None
 if "agent" not in st.session_state:
     st.session_state.agent = None
+if "intelligence" not in st.session_state:
+    st.session_state.intelligence = None
 if "repo_source" not in st.session_state:
     st.session_state.repo_source = ""
 
@@ -46,6 +50,18 @@ with st.sidebar:
     repo_id_text = st.text_input("Repository id", value=parsed_repo_name or settings.default_repository_id)
     persist_dir = st.text_input("Index directory", value=settings.chroma_persist_dir)
     top_k = st.slider("Top K", min_value=1, max_value=10, value=5)
+    capability = st.selectbox(
+        "Capability",
+        [
+            "Codebase Q&A",
+            "Intelligent code search",
+            "Repository architecture analysis",
+            "Dependency/module analysis",
+            "Code review",
+            "Documentation generation",
+            "Unit-test generation",
+        ],
+    )
 
     if st.button("Index repository"):
         try:
@@ -65,48 +81,149 @@ with st.sidebar:
             vector_store.add_chunks([{"content": chunk.content, "metadata": chunk.metadata} for chunk in corpus.chunks], corpus.repository_id)
             tools = RepositoryTools(corpus=corpus, vector_store=vector_store)
             rag = RepositoryRAG(vector_store=vector_store)
+            intelligence = RepositoryIntelligence(tools=tools, rag=rag)
             st.session_state.corpus = corpus
             st.session_state.vector_store = vector_store
-            st.session_state.agent = RepositoryAgent(rag=rag, tools=tools, memory=st.session_state.memory)
+            st.session_state.intelligence = intelligence
+            st.session_state.agent = RepositoryAgent(rag=rag, tools=tools, memory=st.session_state.memory, intelligence=intelligence)
             st.success(f"Cloned to {cloned_path} and indexed {len(corpus.files)} files and {len(corpus.chunks)} chunks.")
         except Exception as exc:  # pragma: no cover - UI guard
             st.error(str(exc))
 
-st.subheader("Chat")
-question = st.text_input("Ask a repository question", value="How does authentication work?")
-run_question = st.button("Ask")
+st.subheader(capability)
 
-if run_question:
-    if st.session_state.agent is None:
+corpus = st.session_state.corpus
+target_file = None
+target_symbol = None
+main_input_label = "Question"
+main_input_value = "How does authentication work?"
+
+if capability == "Intelligent code search":
+    main_input_label = "Search query"
+    main_input_value = "authentication"
+elif capability == "Repository architecture analysis":
+    main_input_label = "Architecture focus"
+    main_input_value = "Explain the repository structure"
+elif capability == "Dependency/module analysis":
+    main_input_label = "Dependency focus"
+    main_input_value = "Show internal imports and module boundaries"
+elif capability == "Code review":
+    main_input_label = "Review scope"
+    main_input_value = "Review the repository for issues"
+elif capability == "Documentation generation":
+    main_input_label = "Documentation scope"
+    main_input_value = "Generate documentation for the repository"
+elif capability == "Unit-test generation":
+    main_input_label = "Test scope"
+    main_input_value = "Generate tests for the repository"
+
+if corpus is not None and capability in {"Code review", "Documentation generation", "Unit-test generation"}:
+    file_options = [""] + [file.file_path for file in corpus.files]
+    target_file = st.selectbox("Target file", file_options)
+    target_symbol = st.text_input("Target symbol", value="")
+
+main_input = st.text_input(main_input_label, value=main_input_value)
+run_action = st.button("Run")
+
+if run_action:
+    if st.session_state.agent is None or st.session_state.intelligence is None:
         st.warning("Index a repository first.")
     else:
-        response = st.session_state.agent.answer(question, top_k=top_k)
+        try:
+            if capability == "Codebase Q&A":
+                response = st.session_state.agent.answer(main_input, top_k=top_k)
+                st.markdown("### Answer")
+                st.write(response["answer"])
+                if "sources" in response:
+                    st.markdown("### Sources")
+                    for source in response["sources"]:
+                        score = source.score if source.score is not None else 0.0
+                        st.write(f"{source.file_path} | {source.symbol} | lines {source.start_line}-{source.end_line} | score {score:.3f}")
+                if "retrieved_chunks" in response:
+                    st.markdown("### Retrieved chunks")
+                    for chunk in response["retrieved_chunks"]:
+                        with st.expander(f"{chunk.metadata.get('file_path')} :: {chunk.metadata.get('symbol')} ({chunk.score:.3f})"):
+                            st.code(chunk.content, language=str(chunk.metadata.get("language", "")))
+                            st.json(chunk.metadata)
+                if "context_text" in response:
+                    st.markdown("### Built context")
+                    st.code(response["context_text"])
+                if "trace" in response:
+                    st.markdown("### Trace")
+                    st.json(response["trace"])
 
-        st.markdown("### Answer")
-        st.write(response["answer"])
+            elif capability == "Intelligent code search":
+                results = st.session_state.intelligence.code_search(main_input, top_k=top_k)
+                st.write(f"{len(results)} result(s) found.")
+                for item in results:
+                    with st.expander(f"{item.metadata.get('file_path')} :: {item.metadata.get('symbol')} ({item.score:.3f})"):
+                        st.code(item.content, language=str(item.metadata.get("language", "")))
+                        st.json(item.metadata)
 
-        if "sources" in response:
-            st.markdown("### Sources")
-            for source in response["sources"]:
-                score = source.score if source.score is not None else 0.0
-                st.write(
-                    f"{source.file_path} | {source.symbol} | lines {source.start_line}-{source.end_line} | score {score:.3f}"
+            elif capability == "Repository architecture analysis":
+                report = st.session_state.intelligence.architecture_analysis()
+                st.markdown("### Summary")
+                st.write(report.summary)
+                st.markdown("### Top-level directories")
+                st.dataframe(report.top_level_directories, use_container_width=True)
+                st.markdown("### Entry points")
+                st.write(report.entrypoints or ["None detected"])
+                st.markdown("### Languages")
+                st.json(report.languages)
+                st.markdown("### Dependency edges")
+                st.dataframe(report.dependency_edges, use_container_width=True)
+                st.markdown("### Notable symbols")
+                st.dataframe(report.notable_symbols, use_container_width=True)
+
+            elif capability == "Dependency/module analysis":
+                report = st.session_state.intelligence.dependency_analysis()
+                st.markdown("### Summary")
+                st.write(report.summary)
+                st.markdown("### Internal edges")
+                st.dataframe(report.internal_edges, use_container_width=True)
+                st.markdown("### External imports")
+                st.write(report.external_imports or ["None detected"])
+                st.markdown("### Fan-in")
+                st.json(report.fan_in)
+                st.markdown("### Fan-out")
+                st.json(report.fan_out)
+
+            elif capability == "Code review":
+                report = st.session_state.intelligence.code_review(target_file=target_file or None)
+                st.markdown("### Summary")
+                st.write(report.summary)
+                st.markdown("### Findings")
+                st.dataframe([asdict(issue) for issue in report.issues], use_container_width=True)
+
+            elif capability == "Documentation generation":
+                artifact = st.session_state.intelligence.generate_documentation(
+                    target_file=target_file or None,
+                    symbol=target_symbol.strip() or None,
                 )
+                st.markdown("### Documentation")
+                st.markdown(artifact.markdown)
+                if artifact.sources:
+                    st.markdown("### Sources")
+                    st.json([asdict(source) for source in artifact.sources])
 
-        if "retrieved_chunks" in response:
-            st.markdown("### Retrieved chunks")
-            for chunk in response["retrieved_chunks"]:
-                with st.expander(f"{chunk.metadata.get('file_path')} :: {chunk.metadata.get('symbol')} ({chunk.score:.3f})"):
-                    st.code(chunk.content, language=str(chunk.metadata.get("language", "")))
-                    st.json(chunk.metadata)
+            elif capability == "Unit-test generation":
+                artifact = st.session_state.intelligence.generate_unit_tests(
+                    target_file=target_file or None,
+                    symbol=target_symbol.strip() or None,
+                )
+                st.markdown("### Generated tests")
+                if artifact.markdown:
+                    st.markdown(artifact.markdown)
+                if artifact.code:
+                    st.code(artifact.code, language="python")
+                else:
+                    st.info("This generator currently emits Python/pytest skeletons only.")
 
-        if "context_text" in response:
-            st.markdown("### Built context")
-            st.code(response["context_text"])
-
-        if "trace" in response:
-            st.markdown("### Trace")
-            st.json(response["trace"])
+        except Exception as exc:  # pragma: no cover - UI guard
+            st.error(str(exc))
 
 st.markdown("### Conversation memory")
-st.code(st.session_state.memory.recent_context())
+if st.session_state.memory.turns:
+    st.code(st.session_state.memory.recent_context())
+else:
+    st.caption("No conversation history yet.")
