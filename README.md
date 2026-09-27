@@ -349,20 +349,6 @@ This project can help developers:
 
 ---
 
-## 📸 Screenshots
-
-### Repository Q&A
-
-*Add screenshot here*
-
-### Code Search
-
-*Add screenshot here*
-
-### Repository Analysis
-
-*Add screenshot here*
-
 ---
 
 ## 🌐 Live Demo
@@ -370,23 +356,6 @@ This project can help developers:
 🚀 **Try the application:**
 
 [AI Software Engineering Copilot](https://ai-software-engineering-project.streamlit.app/)
-
----
-
-## 🔮 Future Improvements
-
-Some planned improvements include:
-
-* Better code dependency analysis
-* Support for more programming languages
-* Improved retrieval accuracy
-* Code review assistance
-* Automated test generation
-* GitHub integration
-* Pull request analysis
-* Repository architecture visualization
-
----
 
 ## 👨‍💻 Author
 
