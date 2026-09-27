@@ -348,9 +348,6 @@ This project can help developers:
 * Explore repositories using natural language
 
 ---
-
----
-
 ## 🌐 Live Demo
 
 🚀 **Try the application:**
